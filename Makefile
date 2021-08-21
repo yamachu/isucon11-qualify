@@ -38,3 +38,6 @@ dump-log/nginx:
 
 dump-log/mysql:
 	mysqldumpslow -s t `ls ~/log/mysql/mariadb-slow-*.log | head -n1`
+
+log/go/tail:
+	journalctl -u isucondition.go.service -n10 -f
