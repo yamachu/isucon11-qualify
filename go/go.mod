@@ -9,5 +9,6 @@ require (
 	github.com/jmoiron/sqlx v1.3.4
 	github.com/labstack/echo/v4 v4.3.0
 	github.com/labstack/gommon v0.3.0
+	golang.org/dl v0.0.0-20210816190658-eea66df5a73d // indirect
 	golang.org/x/crypto v0.0.0-20210513164829-c07d793c2f9a // indirect
 )
