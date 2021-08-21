@@ -67,6 +67,7 @@ type Isu struct {
 	ID         int       `db:"id" json:"id"`
 	JIAIsuUUID string    `db:"jia_isu_uuid" json:"jia_isu_uuid"`
 	Name       string    `db:"name" json:"name"`
+	Image      []byte    `db:"image" json:"-"`
 	Character  string    `db:"character" json:"character"`
 	JIAUserID  string    `db:"jia_user_id" json:"-"`
 	CreatedAt  time.Time `db:"created_at" json:"-"`
@@ -350,51 +351,20 @@ func postInitialize(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "bad request body")
 	}
 
-	cmd := exec.Command("./pre_initialize.sh")
+	cmd := exec.Command("../sql/init.sh")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stderr
 	err = cmd.Run()
 	if err != nil {
 		c.Logger().Errorf("exec init.sh error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	cmd = exec.Command("../sql/init.sh")
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = os.Stderr
-	err = cmd.Run()
-	if err != nil {
-		c.Logger().Errorf("exec init.sh error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	rows, err := db.Query("SELECT `jia_user_id`, `jia_isu_uuid`, `image` FROM `isu`")
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return c.String(http.StatusNotFound, "not found: isu")
-		}
-
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	for rows.Next() {
-		var jia_user_id string
-		var jia_isu_uuid string
-		var image []byte
-		rows.Scan(&jia_user_id, &jia_isu_uuid, &image)
-
-		err = ioutil.WriteFile("./image/"+jia_user_id+"__ISUCONDITION__"+jia_isu_uuid, image, os.ModePerm)
-		if err != nil {
-			c.Logger().Errorf("write image to file error: %v", err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
 	}
 
 	userMapMux.Lock()
 	defer userMapMux.Unlock()
 
 	userMap = make(map[string]bool)
-	rows, err = db.Query("SELECT jia_user_id FROM user")
+	rows, err := db.Query("SELECT jia_user_id FROM user")
 
 	if err != nil {
 		c.Logger().Errorf("db error : %v", err)
@@ -414,15 +384,6 @@ func postInitialize(c echo.Context) error {
 	)
 	if err != nil {
 		c.Logger().Errorf("db error : %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	cmd = exec.Command("../sql/after_post_initialize.sh")
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = os.Stderr
-	err = cmd.Run()
-	if err != nil {
-		c.Logger().Errorf("exec after_post_initialize.sh error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
@@ -667,8 +628,8 @@ func postIsu(c echo.Context) error {
 	defer tx.Rollback()
 
 	_, err = tx.Exec("INSERT INTO `isu`"+
-		"	(`jia_isu_uuid`, `name`, `jia_user_id`) VALUES (?, ?, ?)",
-		jiaIsuUUID, isuName, jiaUserID)
+		"	(`jia_isu_uuid`, `name`, `image`, `jia_user_id`) VALUES (?, ?, ?, ?)",
+		jiaIsuUUID, isuName, image, jiaUserID)
 	if err != nil {
 		mysqlErr, ok := err.(*mysql.MySQLError)
 
@@ -677,12 +638,6 @@ func postIsu(c echo.Context) error {
 		}
 
 		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	err = ioutil.WriteFile("./image/"+jiaUserID+"__ISUCONDITION__"+jiaIsuUUID, image, os.ModePerm)
-	if err != nil {
-		c.Logger().Errorf("write image to file error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
@@ -797,12 +752,17 @@ func getIsuIcon(c echo.Context) error {
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 
 	var image []byte
-	image, err = ioutil.ReadFile("./image/" + jiaUserID + "__ISUCONDITION__" + jiaIsuUUID)
+	err = db.Get(&image, "SELECT `image` FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ?",
+		jiaUserID, jiaIsuUUID)
 	if err != nil {
-		return c.String(http.StatusNotFound, "not found: isu")
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.String(http.StatusNotFound, "not found: isu")
+		}
+
+		c.Logger().Errorf("db error: %v", err)
+		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	c.Response().Header().Set("Cache-Control", "public")
 	return c.Blob(http.StatusOK, "", image)
 }
 
