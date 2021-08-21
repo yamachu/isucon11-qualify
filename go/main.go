@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
@@ -50,6 +51,11 @@ var (
 	jiaJWTSigningKey *ecdsa.PublicKey
 
 	postIsuConditionTargetBaseURL string // JIAへのactivate時に登録する，ISUがconditionを送る先のURL
+)
+
+var (
+	userMap    = make(map[string]bool)
+	userMapMux = sync.RWMutex{}
 )
 
 type Config struct {
@@ -276,6 +282,17 @@ func getUserIDFromSession(c echo.Context) (string, int, error) {
 	}
 
 	jiaUserID := _jiaUserID.(string)
+
+	userMapMux.RLock()
+	if _, ok := userMap[jiaUserID]; ok {
+		userMapMux.RUnlock()
+		return jiaUserID, 0, nil
+	}
+	userMapMux.RUnlock()
+
+	userMapMux.Lock()
+	defer userMapMux.Unlock()
+
 	var count int
 
 	err = db.Get(&count, "SELECT COUNT(*) FROM `user` WHERE `jia_user_id` = ?",
@@ -287,6 +304,7 @@ func getUserIDFromSession(c echo.Context) (string, int, error) {
 	if count == 0 {
 		return "", http.StatusUnauthorized, fmt.Errorf("not found: user")
 	}
+	userMap[jiaUserID] = true
 
 	return jiaUserID, 0, nil
 }
@@ -319,6 +337,23 @@ func postInitialize(c echo.Context) error {
 	if err != nil {
 		c.Logger().Errorf("exec init.sh error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	userMapMux.Lock()
+	defer userMapMux.Unlock()
+
+	userMap = make(map[string]bool)
+	rows, err := db.Query("SELECT jia_user_id FROM user")
+
+	if err != nil {
+		c.Logger().Errorf("db error : %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	for rows.Next() {
+		var userId string
+		_ = rows.Scan(&userId)
+		userMap[userId] = true
 	}
 
 	_, err = db.Exec(
@@ -389,6 +424,10 @@ func postAuthentication(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+
+	userMapMux.Lock()
+	userMap[jiaUserID] = true
+	userMapMux.Unlock()
 
 	return c.NoContent(http.StatusOK)
 }
