@@ -248,7 +248,7 @@ func init() {
 func main() {
 	e := echo.New()
 	// NOTE: リリース時にfalseにすること
-	e.Debug = true
+	e.Debug = false
 	e.Logger.SetLevel(log.DEBUG)
 
 	e.Use(middleware.Logger())
