@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,6 +114,15 @@ type IsuWithCondition struct {
 	Condition  IsuConditionNullable `db:"condition"`
 }
 
+type IsuTrend struct {
+	ID         int       `db:"id" json:"id"`
+	JIAIsuUUID string    `db:"jia_isu_uuid" json:"jia_isu_uuid"`
+	Name       string    `db:"name" json:"name"`
+	Character  string    `db:"character" json:"character"`
+	Condition  string    `db:"condition"`
+	Timestamp  time.Time `db:"timestamp"`
+}
+
 type MySQLConnectionEnv struct {
 	Host     string
 	Port     string
@@ -193,6 +201,12 @@ type PostIsuConditionRequest struct {
 type JIAServiceRequest struct {
 	TargetBaseURL string `json:"target_base_url"`
 	IsuUUID       string `json:"isu_uuid"`
+}
+
+type MyCondition struct {
+	characterInfoIsuConditions     []*TrendCondition
+	characterWarningIsuConditions  []*TrendCondition
+	characterCriticalIsuConditions []*TrendCondition
 }
 
 func getEnv(key string, defaultValue string) string {
@@ -375,6 +389,15 @@ func postInitialize(c echo.Context) error {
 		var userId string
 		_ = rows.Scan(&userId)
 		userMap[userId] = true
+	}
+
+	cmd = exec.Command("../sql/after_post_initialize.sh")
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stderr
+	err = cmd.Run()
+	if err != nil {
+		c.Logger().Errorf("exec after_post_initialize.sh error: %v", err)
+		return c.NoContent(http.StatusInternalServerError)
 	}
 
 	_, err = db.Exec(
@@ -1157,72 +1180,64 @@ func getTrend(c echo.Context) error {
 	}
 
 	res := []TrendResponse{}
+	isuTrend := []IsuTrend{}
 
-	for _, character := range characterList {
-		isuList := []Isu{}
-		err := db.Select(&isuList,
-			"SELECT * FROM `isu` WHERE `character` = ?",
-			character,
-		)
+	conditionMap := make(map[string]MyCondition)
+	_ = db.Select(&isuTrend, "select isu.id as id, isu.jia_isu_uuid as jia_isu_uuid, isu.name as name, isu.character as `character`, latest_isu_condition.condition as `condition`, latest_isu_condition.timestamp as `timestamp` from isu join latest_isu_condition on latest_isu_condition.jia_isu_uuid = isu.jia_isu_uuid order by timestamp desc")
+	c.Logger().Errorf("aaaa, %d\n", len(isuTrend))
+
+	for _, trend := range isuTrend {
+		isuLastCondition := trend
+		conditionLevel, err := calculateConditionLevel(isuLastCondition.Condition)
 		if err != nil {
-			c.Logger().Errorf("db error: %v", err)
+			c.Logger().Error(err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
-
-		characterInfoIsuConditions := []*TrendCondition{}
-		characterWarningIsuConditions := []*TrendCondition{}
-		characterCriticalIsuConditions := []*TrendCondition{}
-		for _, isu := range isuList {
-			// ここを直す
-			conditions := []IsuCondition{}
-			err = db.Select(&conditions,
-				"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY timestamp DESC",
-				isu.JIAIsuUUID,
-			)
-			if err != nil {
-				c.Logger().Errorf("db error: %v", err)
-				return c.NoContent(http.StatusInternalServerError)
-			}
-
-			if len(conditions) > 0 {
-				isuLastCondition := conditions[0]
-				conditionLevel, err := calculateConditionLevel(isuLastCondition.Condition)
-				if err != nil {
-					c.Logger().Error(err)
-					return c.NoContent(http.StatusInternalServerError)
-				}
-				trendCondition := TrendCondition{
-					ID:        isu.ID,
-					Timestamp: isuLastCondition.Timestamp.Unix(),
-				}
-				switch conditionLevel {
-				case "info":
-					characterInfoIsuConditions = append(characterInfoIsuConditions, &trendCondition)
-				case "warning":
-					characterWarningIsuConditions = append(characterWarningIsuConditions, &trendCondition)
-				case "critical":
-					characterCriticalIsuConditions = append(characterCriticalIsuConditions, &trendCondition)
-				}
-			}
-
+		trendCondition := TrendCondition{
+			ID:        trend.ID,
+			Timestamp: isuLastCondition.Timestamp.Unix(),
 		}
 
-		sort.Slice(characterInfoIsuConditions, func(i, j int) bool {
-			return characterInfoIsuConditions[i].Timestamp > characterInfoIsuConditions[j].Timestamp
+		if v, ok := conditionMap[trend.Character]; ok {
+			switch conditionLevel {
+			case "info":
+				v.characterInfoIsuConditions = append(v.characterInfoIsuConditions, &trendCondition)
+			case "warning":
+				v.characterWarningIsuConditions = append(v.characterWarningIsuConditions, &trendCondition)
+			case "critical":
+				v.characterCriticalIsuConditions = append(v.characterCriticalIsuConditions, &trendCondition)
+			}
+			conditionMap[trend.Character] = v
+		} else {
+			characterInfoIsuConditions := []*TrendCondition{}
+			characterWarningIsuConditions := []*TrendCondition{}
+			characterCriticalIsuConditions := []*TrendCondition{}
+			conditionMap[trend.Character] = MyCondition{
+				characterInfoIsuConditions:     characterInfoIsuConditions,
+				characterWarningIsuConditions:  characterWarningIsuConditions,
+				characterCriticalIsuConditions: characterCriticalIsuConditions,
+			}
+			v = conditionMap[trend.Character]
+			switch conditionLevel {
+			case "info":
+				v.characterInfoIsuConditions = append(v.characterInfoIsuConditions, &trendCondition)
+			case "warning":
+				v.characterWarningIsuConditions = append(v.characterWarningIsuConditions, &trendCondition)
+			case "critical":
+				v.characterCriticalIsuConditions = append(v.characterCriticalIsuConditions, &trendCondition)
+			}
+			conditionMap[trend.Character] = v
+		}
+	}
+
+	for _, v := range characterList {
+		hoge := conditionMap[v]
+		res = append(res, TrendResponse{
+			Character: v,
+			Info:      hoge.characterInfoIsuConditions,
+			Warning:   hoge.characterWarningIsuConditions,
+			Critical:  hoge.characterCriticalIsuConditions,
 		})
-		sort.Slice(characterWarningIsuConditions, func(i, j int) bool {
-			return characterWarningIsuConditions[i].Timestamp > characterWarningIsuConditions[j].Timestamp
-		})
-		sort.Slice(characterCriticalIsuConditions, func(i, j int) bool {
-			return characterCriticalIsuConditions[i].Timestamp > characterCriticalIsuConditions[j].Timestamp
-		})
-		res = append(res,
-			TrendResponse{
-				Character: character,
-				Info:      characterInfoIsuConditions,
-				Warning:   characterWarningIsuConditions,
-				Critical:  characterCriticalIsuConditions,
-			})
 	}
 
 	return c.JSON(http.StatusOK, res)
@@ -1293,6 +1308,21 @@ func postIsuCondition(c echo.Context) error {
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	if len(req) > 0 {
+		cond := req[len(req)-1]
+		timestamp := time.Unix(cond.Timestamp, 0)
+		_, err = tx.Exec(
+			"INSERT INTO `latest_isu_condition`"+
+				"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)"+
+				"	VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE `jia_isu_uuid` = VALUES(jia_isu_uuid)",
+			jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
+		if err != nil {
+			c.Logger().Errorf("db error: %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+
 	}
 
 	err = tx.Commit()
