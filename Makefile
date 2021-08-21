@@ -18,3 +18,11 @@ log_rotate/nginx:
 
 restart/nginx:
 	sudo systemctl restart nginx
+
+build/go:
+	make -C go isucondition
+
+restart/go:
+	sudo systemctl restart isucondition.go.service
+
+pre-bench: restart/mysql restart/nginx build/go restart/go
