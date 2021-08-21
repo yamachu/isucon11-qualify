@@ -66,7 +66,6 @@ type Isu struct {
 	ID         int       `db:"id" json:"id"`
 	JIAIsuUUID string    `db:"jia_isu_uuid" json:"jia_isu_uuid"`
 	Name       string    `db:"name" json:"name"`
-	Image      []byte    `db:"image" json:"-"`
 	Character  string    `db:"character" json:"character"`
 	JIAUserID  string    `db:"jia_user_id" json:"-"`
 	CreatedAt  time.Time `db:"created_at" json:"-"`
@@ -365,7 +364,16 @@ func postInitialize(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "bad request body")
 	}
 
-	cmd := exec.Command("../sql/init.sh")
+	cmd := exec.Command("./pre_initialize.sh")
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stderr
+	err = cmd.Run()
+	if err != nil {
+		c.Logger().Errorf("exec pre_initialize.sh error: %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	cmd = exec.Command("../sql/init.sh")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stderr
 	err = cmd.Run()
@@ -374,11 +382,33 @@ func postInitialize(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	rows, err := db.Query("SELECT `jia_user_id`, `jia_isu_uuid`, `image` FROM `isu`")
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.String(http.StatusNotFound, "not found: isu")
+		}
+
+		c.Logger().Errorf("db error: %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	for rows.Next() {
+		var jia_user_id string
+		var jia_isu_uuid string
+		var image []byte
+		rows.Scan(&jia_user_id, &jia_isu_uuid, &image)
+
+		err = ioutil.WriteFile("./image/"+jia_user_id+"__ISUCONDITION__"+jia_isu_uuid, image, os.ModePerm)
+		if err != nil {
+			c.Logger().Errorf("write image to file error: %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+	}
+
 	userMapMux.Lock()
 	defer userMapMux.Unlock()
 
 	userMap = make(map[string]bool)
-	rows, err := db.Query("SELECT jia_user_id FROM user")
+	rows, err = db.Query("SELECT jia_user_id FROM user")
 
 	if err != nil {
 		c.Logger().Errorf("db error : %v", err)
@@ -651,8 +681,8 @@ func postIsu(c echo.Context) error {
 	defer tx.Rollback()
 
 	_, err = tx.Exec("INSERT INTO `isu`"+
-		"	(`jia_isu_uuid`, `name`, `image`, `jia_user_id`) VALUES (?, ?, ?, ?)",
-		jiaIsuUUID, isuName, image, jiaUserID)
+		"	(`jia_isu_uuid`, `name`, `jia_user_id`) VALUES (?, ?, ?)",
+		jiaIsuUUID, isuName, jiaUserID)
 	if err != nil {
 		mysqlErr, ok := err.(*mysql.MySQLError)
 
@@ -664,17 +694,25 @@ func postIsu(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	err = os.WriteFile("./image/"+jiaUserID+"__ISUCONDITION__"+jiaIsuUUID, image, os.ModePerm)
+	if err != nil {
+		c.Logger().Errorf("write image to file error: %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
 	targetURL := getJIAServiceURL(tx) + "/api/activate"
 	body := JIAServiceRequest{postIsuConditionTargetBaseURL, jiaIsuUUID}
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
 		c.Logger().Error(err)
+		os.Remove("./image/" + jiaUserID + "__ISUCONDITION__" + jiaIsuUUID)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
 	reqJIA, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewBuffer(bodyJSON))
 	if err != nil {
 		c.Logger().Error(err)
+		os.Remove("./image/" + jiaUserID + "__ISUCONDITION__" + jiaIsuUUID)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
@@ -682,6 +720,7 @@ func postIsu(c echo.Context) error {
 	res, err := http.DefaultClient.Do(reqJIA)
 	if err != nil {
 		c.Logger().Errorf("failed to request to JIAService: %v", err)
+		os.Remove("./image/" + jiaUserID + "__ISUCONDITION__" + jiaIsuUUID)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	defer res.Body.Close()
@@ -689,11 +728,13 @@ func postIsu(c echo.Context) error {
 	resBody, err := ioutil.ReadAll(res.Body)
 	if err != nil {
 		c.Logger().Error(err)
+		os.Remove("./image/" + jiaUserID + "__ISUCONDITION__" + jiaIsuUUID)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
 	if res.StatusCode != http.StatusAccepted {
 		c.Logger().Errorf("JIAService returned error: status code %v, message: %v", res.StatusCode, string(resBody))
+		os.Remove("./image/" + jiaUserID + "__ISUCONDITION__" + jiaIsuUUID)
 		return c.String(res.StatusCode, "JIAService returned error")
 	}
 
@@ -701,12 +742,14 @@ func postIsu(c echo.Context) error {
 	err = json.Unmarshal(resBody, &isuFromJIA)
 	if err != nil {
 		c.Logger().Error(err)
+		os.Remove("./image/" + jiaUserID + "__ISUCONDITION__" + jiaIsuUUID)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
 	_, err = tx.Exec("UPDATE `isu` SET `character` = ? WHERE  `jia_isu_uuid` = ?", isuFromJIA.Character, jiaIsuUUID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
+		os.Remove("./image/" + jiaUserID + "__ISUCONDITION__" + jiaIsuUUID)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
@@ -717,12 +760,14 @@ func postIsu(c echo.Context) error {
 		jiaUserID, jiaIsuUUID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
+		os.Remove("./image/" + jiaUserID + "__ISUCONDITION__" + jiaIsuUUID)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
 	err = tx.Commit()
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
+		os.Remove("./image/" + jiaUserID + "__ISUCONDITION__" + jiaIsuUUID)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
@@ -775,15 +820,9 @@ func getIsuIcon(c echo.Context) error {
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 
 	var image []byte
-	err = db.Get(&image, "SELECT `image` FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ?",
-		jiaUserID, jiaIsuUUID)
+	image, err = os.ReadFile("./image/" + jiaUserID + "__ISUCONDITION__" + jiaIsuUUID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return c.String(http.StatusNotFound, "not found: isu")
-		}
-
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
+		return c.String(http.StatusNotFound, "not found: isu")
 	}
 
 	return c.Blob(http.StatusOK, "", image)

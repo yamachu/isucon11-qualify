@@ -8,3 +8,6 @@ JOIN
    FROM isu_condition
    GROUP BY jia_isu_uuid) AS ic2 ON ic2.jia_isu_uuid = ic1.jia_isu_uuid
 AND ic2.latestAt = ic1.timestamp;
+
+ALTER TABLE `isu`
+DROP `image`;
