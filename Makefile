@@ -19,6 +19,8 @@ log_rotate/nginx:
 restart/nginx:
 	sudo systemctl restart nginx
 
+log_rotate: log_rotate/nginx log_rotate/mysql
+
 build/go:
 	make -C go isucondition
 
@@ -26,3 +28,13 @@ restart/go:
 	sudo systemctl restart isucondition.go.service
 
 pre-bench: restart/mysql restart/nginx build/go restart/go
+
+post-bench: log_rotate
+
+dump-log: dump-log/nginx dump-log/mysql
+
+dump-log/nginx:
+	ls ~/log/nginx/access*.log | head -n1 | alp ltsv --sort sum -r --format md
+
+dump-log/mysql:
+	mysqldumpslow -s t `ls ~/log/mysql/mariadb-slow-*.log | head -n1`
