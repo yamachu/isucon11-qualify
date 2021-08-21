@@ -94,6 +94,25 @@ type IsuCondition struct {
 	Condition  string    `db:"condition"`
 	Message    string    `db:"message"`
 	CreatedAt  time.Time `db:"created_at"`
+	JIAUserID  string    `db:"-" json:"-"`
+}
+
+type IsuConditionNullable struct {
+	ID         sql.NullInt32  `db:"id"`
+	JIAIsuUUID sql.NullString `db:"jia_isu_uuid"`
+	Timestamp  sql.NullTime   `db:"timestamp"`
+	IsSitting  sql.NullBool   `db:"is_sitting"`
+	Condition  sql.NullString `db:"condition"`
+	Message    sql.NullString `db:"message"`
+	CreatedAt  sql.NullTime   `db:"created_at"`
+}
+
+type IsuWithCondition struct {
+	ID         int                  `db:"id" json:"id"`
+	JIAIsuUUID string               `db:"jia_isu_uuid" json:"jia_isu_uuid"`
+	Name       string               `db:"name" json:"name"`
+	Character  string               `db:"character" json:"character"`
+	Condition  IsuConditionNullable `db:"condition"`
 }
 
 type MySQLConnectionEnv struct {
@@ -214,6 +233,7 @@ func init() {
 
 func main() {
 	e := echo.New()
+	// NOTE: リリース時にfalseにすること
 	e.Debug = true
 	e.Logger.SetLevel(log.DEBUG)
 
@@ -250,6 +270,7 @@ func main() {
 		e.Logger.Fatalf("failed to connect db: %v", err)
 		return
 	}
+	// NOTE: DBチューニングしたら増やす (DBのdefaultは151)
 	db.SetMaxOpenConns(10)
 	defer db.Close()
 
@@ -498,47 +519,38 @@ func getIsuList(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	isuList := []Isu{}
-	err = tx.Select(
-		&isuList,
-		"SELECT * FROM `isu` WHERE `jia_user_id` = ? ORDER BY `id` DESC",
-		jiaUserID)
+	isuWithConditionList := []IsuWithCondition{}
+
+	err = tx.Select(&isuWithConditionList,
+		"select isu.id as id, isu.jia_isu_uuid as jia_isu_uuid, isu.name as name, isu.character as `character`, isu3.id as `condition.id`, isu3.jia_isu_uuid as `condition.jia_isu_uuid`, isu3.timestamp as `condition.timestamp`, isu3.is_sitting as `condition.is_sitting`, isu3.condition as `condition.condition`, isu3.message as `condition.message`, isu3.created_at as `condition.created_at` from isu left join (select ic1.* from isu_condition as ic1 join (select id, max(timestamp) as latestAt, jia_isu_uuid from isu_condition where jia_isu_uuid in (select jia_isu_uuid from isu where jia_user_id = ? ) group by jia_isu_uuid) as ic2 on ic2.jia_isu_uuid = ic1.jia_isu_uuid and ic2.latestAt = ic1.timestamp) as isu3 on isu3.jia_isu_uuid = isu.jia_isu_uuid where isu.jia_user_id = ? order by isu.id desc",
+		jiaUserID, jiaUserID)
+
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
 	responseList := []GetIsuListResponse{}
-	for _, isu := range isuList {
-		var lastCondition IsuCondition
-		foundLastCondition := true
-		err = tx.Get(&lastCondition, "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY `timestamp` DESC LIMIT 1",
-			isu.JIAIsuUUID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				foundLastCondition = false
-			} else {
-				c.Logger().Errorf("db error: %v", err)
-				return c.NoContent(http.StatusInternalServerError)
-			}
-		}
+	for _, isu := range isuWithConditionList {
 
 		var formattedCondition *GetIsuConditionResponse
-		if foundLastCondition {
-			conditionLevel, err := calculateConditionLevel(lastCondition.Condition)
+		// fmt.Printf("(%%#v) %#v\n", isu)
+		// fmt.Printf("(%%#v) %#v\n", isu.Condition)
+		if isu.Condition.ID.Valid {
+			conditionLevel, err := calculateConditionLevel(isu.Condition.Condition.String)
 			if err != nil {
 				c.Logger().Error(err)
 				return c.NoContent(http.StatusInternalServerError)
 			}
 
 			formattedCondition = &GetIsuConditionResponse{
-				JIAIsuUUID:     lastCondition.JIAIsuUUID,
+				JIAIsuUUID:     isu.Condition.JIAIsuUUID.String,
 				IsuName:        isu.Name,
-				Timestamp:      lastCondition.Timestamp.Unix(),
-				IsSitting:      lastCondition.IsSitting,
-				Condition:      lastCondition.Condition,
+				Timestamp:      isu.Condition.Timestamp.Time.Unix(),
+				IsSitting:      isu.Condition.IsSitting.Bool,
+				Condition:      isu.Condition.Condition.String,
 				ConditionLevel: conditionLevel,
-				Message:        lastCondition.Message,
+				Message:        isu.Condition.Message.String,
 			}
 		}
 
