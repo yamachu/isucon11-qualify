@@ -34,10 +34,10 @@ post-bench: log_rotate
 dump-log: dump-log/nginx dump-log/mysql
 
 dump-log/nginx:
-	ls ~/log/nginx/access*.log | head -n1 | alp ltsv --sort sum -r --format md
+	ls -t ~/log/nginx/access*.log | head -n1 | xargs cat | alp ltsv --sort sum -r --format md
 
 dump-log/mysql:
-	mysqldumpslow -s t `ls ~/log/mysql/mariadb-slow-*.log | head -n1`
+	mysqldumpslow -s t `ls -t ~/log/mysql/mariadb-slow-*.log | head -n1`
 
 log/go/tail:
 	journalctl -u isucondition.go.service -n10 -f
