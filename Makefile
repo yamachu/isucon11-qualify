@@ -11,3 +11,10 @@ log_rotate/mysql:
 
 restart/mysql:
 	sudo systemctl restart mysql
+
+log_rotate/nginx:
+	-sudo mv /var/log/nginx/access.log ~/log/nginx/access-${DATE}.log
+	-sudo chmod 666 ~/log/nginx/access-${DATE}.log
+
+restart/nginx:
+	sudo systemctl restart nginx
